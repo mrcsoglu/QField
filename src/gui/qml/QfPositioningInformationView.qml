@@ -6,7 +6,10 @@ import org.qfield.core
 import org.qfield.gui
 
 /**
- * \ingroup qml_gui
+ * Compact field-friendly positioning information view.
+ *
+ * Keeps the QfPositioningInformationModel and public aliases intact so the
+ * existing QfInformationDrawer can host this component without changes.
  */
 Rectangle {
   id: positioningInformationView
@@ -14,80 +17,145 @@ Rectangle {
   property alias positionSource: positioningInformationModel.positioningSource
   property alias antennaHeight: positioningInformationModel.antennaHeight
 
+  // Preserved compatibility properties for existing QML consumers.
   property color backgroundColor: "transparent"
   property color alternateBackgroundColor: QfTheme.positionBackgroundColor
-  property color textColor: positionSource.currentness ? QfTheme.mainTextColor : QfTheme.secondaryTextColor
+  property color textColor: hasPosition ? QfTheme.mainTextColor : QfTheme.secondaryTextColor
   property double cellHeight: 26
   property double cellPadding: 6
-  property real contentHeight: grid.numberOfRows * cellHeight
+  property real contentHeight: contentLayout.implicitHeight + 24
+
+  readonly property var gpsInfo: positionSource ? positionSource.positionInformation : null
+  readonly property bool hasPosition: gpsInfo !== null && gpsInfo.latitudeValid && gpsInfo.longitudeValid
+  readonly property real latitude: hasPosition ? Number(gpsInfo.latitude) : NaN
+  readonly property real longitude: hasPosition ? Number(gpsInfo.longitude) : NaN
+  readonly property bool supportsUtm: hasPosition && latitude >= -80 && latitude <= 84
+  readonly property int utmZone: supportsUtm ? Math.max(1, Math.min(60, Math.floor((longitude + 180) / 6) + 1)) : 0
+  readonly property string utmBand: {
+    if (!supportsUtm) return "";
+    const letters = "CDEFGHJKLMNPQRSTUVWX";
+    return letters.charAt(Math.max(0, Math.min(19, Math.floor((latitude + 80) / 8))));
+  }
+  readonly property string utmPrefix: supportsUtm ? utmZone + utmBand : ""
+
+  function copyLocation() {
+    if (!hasPosition) return;
+    try {
+      const p = QfGeometryUtils.reprojectPoint(
+        QfGeometryUtils.point(longitude, latitude),
+        QfCoordinateReferenceSystemUtils.wgs84Crs(),
+        positioningInformationModel.coordinateDisplayCrs);
+      const x = Number(p.x);
+      const y = Number(p.y);
+      if (!isFinite(x) || !isFinite(y)) return;
+      const text = (supportsUtm ? utmPrefix + " " : "") +
+                   Math.round(x) + " " + Math.round(y);
+      platformUtilities.copyTextToClipboard(text);
+      iface.mainWindow().displayToast(qsTr("Koordinat kopyalandı"));
+    } catch (e) {
+      console.warn("Position card could not copy coordinate: " + e);
+    }
+  }
 
   color: QfTheme.mainBackgroundColorSemiOpaque
-  anchors.margins: 20
-  width: parent.width
+  width: parent ? parent.width : 320
   clip: true
 
-  Flickable {
-    width: parent.width
-    height: positioningInformationView.height
-    contentHeight: grid.height
-    boundsBehavior: Flickable.StopAtBounds
-    ScrollBar.vertical: QfScrollBar {}
+  QfPositioningInformationModel {
+    id: positioningInformationModel
+    distanceUnits: projectInfo.distanceUnits
+    // Automatically display WGS84 UTM in the correct zone, where supported.
+    // Outside UTM bounds, respect QField's normal display CRS.
+    coordinateDisplayCrs: positioningInformationView.supportsUtm
+      ? QfCoordinateReferenceSystemUtils.fromDescription(
+          "EPSG:" + ((positioningInformationView.latitude >= 0 ? 32600 : 32700) +
+                     positioningInformationView.utmZone))
+      : projectInfo.coordinateDisplayCrs
+  }
 
-    GridView {
-      id: grid
+  ColumnLayout {
+    id: contentLayout
+    anchors.left: parent.left
+    anchors.right: parent.right
+    anchors.top: parent.top
+    anchors.margins: 12
+    spacing: 8
 
-      readonly property real numberOfColumns: parent.width > 1000 ? 6 : parent.width > 620 ? 3 : 2
-      readonly property real numberOfRows: Math.ceil(grid.count / numberOfColumns)
+    RowLayout {
+      Layout.fillWidth: true
+      spacing: 8
 
-      flow: GridView.FlowTopToBottom
-      boundsBehavior: Flickable.StopAtBounds
-      model: QfPositioningInformationModel {
-        id: positioningInformationModel
-        distanceUnits: projectInfo.distanceUnits
-        coordinateDisplayCrs: projectInfo.coordinateDisplayCrs
-      }
-      height: grid.numberOfRows * cellHeight
-      width: parent.width
-      cellHeight: positioningInformationView.cellHeight
-      cellWidth: parent.width / numberOfColumns
-      clip: true
+      ColumnLayout {
+        Layout.fillWidth: true
+        spacing: 1
 
-      delegate: Rectangle {
-        readonly property real currentColumn: parseInt(index / grid.numberOfRows)
-        readonly property real currentRow: index % grid.numberOfRows
-
-        width: grid.cellWidth
-        height: grid.cellHeight
-        color: {
-          if (currentColumn % 2 == 0) {
-            return currentRow % 2 == 0 ? alternateBackgroundColor : backgroundColor;
-          } else {
-            return currentRow % 2 == 0 ? backgroundColor : alternateBackgroundColor;
-          }
+        Text {
+          text: qsTr("Konumum")
+          color: QfTheme.mainTextColor
+          font.bold: true
+          font.pixelSize: 15
         }
+        Text {
+          text: positioningInformationView.supportsUtm
+            ? qsTr("WGS84 / UTM ") + positioningInformationView.utmPrefix
+            : qsTr("Konum bekleniyor")
+          color: QfTheme.secondaryTextColor
+          font: QfTheme.tipFont
+        }
+      }
 
-        RowLayout {
-          anchors.margins: cellPadding
-          anchors.verticalCenter: parent.verticalCenter
-          anchors.left: parent.left
-          anchors.right: parent.right
+      QfButton {
+        text: qsTr("Kopyala")
+        enabled: positioningInformationView.hasPosition
+        onClicked: positioningInformationView.copyLocation()
+      }
+    }
 
-          Text {
-            Layout.maximumWidth: parent.width * 0.66
-            font: QfTheme.tipFont
-            color: QfTheme.secondaryTextColor
-            text: Name
-            verticalAlignment: Text.AlignVCenter
-            elide: Text.ElideRight
-          }
+    Flow {
+      id: infoCards
+      Layout.fillWidth: true
+      Layout.preferredHeight: childrenRect.height
+      spacing: 8
 
-          Text {
-            Layout.fillWidth: true
-            font: QfTheme.tipFont
-            color: positioningInformationView.textColor
-            text: Value ? Value : qsTr("N/A")
-            verticalAlignment: Text.AlignVCenter
-            elide: Text.ElideRight
+      Repeater {
+        model: positioningInformationModel
+
+        Rectangle {
+          readonly property bool isCoordinate: index < 2
+          readonly property bool hasUsefulValue: Value !== undefined && Value !== null &&
+                                                  String(Value).length > 0 &&
+                                                  String(Value) !== "N/A" &&
+                                                  String(Value) !== "Yok"
+          visible: index < 6 && (isCoordinate || hasUsefulValue)
+          width: isCoordinate
+            ? Math.max(120, (infoCards.width - infoCards.spacing) / 2)
+            : Math.max(100, (infoCards.width - infoCards.spacing * 2) / 3)
+          height: isCoordinate ? 64 : 46
+          radius: 9
+          color: QfTheme.groupBoxBackgroundColor
+
+          Column {
+            anchors.fill: parent
+            anchors.margins: 9
+            spacing: 4
+
+            Text {
+              width: parent.width
+              text: index === 0 ? qsTr("Doğu (X)") :
+                    index === 1 ? qsTr("Kuzey (Y)") : Name
+              color: QfTheme.secondaryTextColor
+              font: QfTheme.tipFont
+              elide: Text.ElideRight
+            }
+
+            Text {
+              width: parent.width
+              text: Value ? String(Value) : "—"
+              color: positioningInformationView.textColor
+              font.pixelSize: isCoordinate ? 17 : 13
+              font.bold: isCoordinate
+              elide: Text.ElideRight
+            }
           }
         }
       }
