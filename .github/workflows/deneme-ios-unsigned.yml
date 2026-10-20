@@ -1,0 +1,101 @@
+name: Deneme - Sertifikasiz iOS QField
+
+on:
+  push:
+    branches:
+      - deneme-ozel-konum-paneli-ios
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check-qml:
+    name: QML syntax on macOS
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Qt QML tools
+        run: brew install qt
+      - name: Parse positioning panel
+        run: |
+          "$(brew --prefix qt)/bin/qmlformat" src/gui/qml/QfPositioningInformationView.qml > /tmp/positioning-formatted.qml
+          echo 'QML parse succeeded'
+
+  try-unsigned-ios:
+    name: iOS unsigned build experiment
+    runs-on: macos-15
+    needs: check-qml
+    timeout-minutes: 75
+    env:
+      BUILD_DIR: /Users/runner/qfield-ios-unsigned
+      NUGET_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Xcode version
+        run: xcodebuild -version
+      - name: Install iOS build requirements
+        run: |
+          brew install automake bison flex gnu-sed autoconf-archive nasm libtool mono
+          echo "$(brew --prefix bison)/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix flex)/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix libtool)/bin" >> "$GITHUB_PATH"
+      - name: Install CMake
+        uses: lukka/get-cmake@latest
+        with:
+          cmakeVersion: 3.31.6
+      - name: Configure iOS without signing
+        run: |
+          cmake -S "$GITHUB_WORKSPACE" -B "$BUILD_DIR" -G Xcode \
+            -D CMAKE_BUILD_TYPE=Release \
+            -D CMAKE_SYSTEM_NAME=iOS \
+            -D CMAKE_SYSTEM_PROCESSOR=aarch64 \
+            -D CMAKE_OSX_DEPLOYMENT_TARGET=17.0 \
+            -D CMAKE_XCODE_ATTRIBUTE_IPHONEOS_DEPLOYMENT_TARGET=17.0 \
+            -D CMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO \
+            -D CMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED=NO \
+            -D CMAKE_XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY='' \
+            -D CMAKE_CXX_VISIBILITY_PRESET=hidden \
+            -D VCPKG_TARGET_TRIPLET=arm64-ios \
+            -D VCPKG_HOST_TRIPLET=arm64-osx \
+            -D WITH_VCPKG=ON \
+            -D WITH_SPIX=OFF \
+            -D WITH_BLUETOOTH=ON \
+            -D WITH_SERIALPORT=OFF \
+            -D WITH_NFC=OFF \
+            -D WITH_CCACHE=OFF \
+            -D ENABLE_TESTS=OFF \
+            -D APP_VERSION=v4.3.6 \
+            -D APP_VERSION_STR=4.3.6-ozel \
+            -D APP_PACKAGE_NAME=qfield-ozel \
+            -D APP_NAME='QField Ozel' \
+            -D IOS_APP_IDENTIFIER=org.qfield.deneme.rize \
+            -D NUGET_USERNAME=opengisch \
+            -D NUGET_TOKEN="$NUGET_TOKEN" \
+            -D VCPKG_INSTALL_OPTIONS='--x-abi-tools-use-exact-versions'
+      - name: Compile unsigned iOS app
+        run: |
+          cmake --build "$BUILD_DIR" --target qfield --config Release -- CODE_SIGNING_ALLOWED=NO
+      - name: Package unsigned IPA for local signing only
+        run: |
+          APP_PATH="$(find "$BUILD_DIR" -type d -name qfield.app -not -path '*/vcpkg_installed/*' | head -n 1)"
+          test -n "$APP_PATH"
+          mkdir -p unsigned/Payload
+          cp -R "$APP_PATH" unsigned/Payload/
+          cd unsigned
+          zip -qry QField-Ozel-UNSIGNED.ipa Payload
+      - name: Save experimental unsigned IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: qfield-ozel-unsigned-ipa
+          path: unsigned/QField-Ozel-UNSIGNED.ipa
+      - name: Save CMake diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-experiment-build-logs
+          path: /Users/runner/qfield-ios-unsigned/**/*.log
+          if-no-files-found: ignore
